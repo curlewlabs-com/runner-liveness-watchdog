@@ -216,9 +216,18 @@ stretch since it last became free. On a lightly loaded host expect no names.
 - **A single `/proc` read that fails** is read as that process being gone.
   The listing of `/proc` itself fails closed, but a Worker or an ancestor whose
   own entry cannot be read mid-pass can be missed for that pass.
-- **A `failed` unit is restarted without a Worker check.** A Worker that
-  outlived the unit's main process could find a new listener beside its job;
-  a unit's own `Restart=` does the same.
+- **The Worker check is not re-read immediately before acting.** It is read
+  once per unit per pass, before the reads that decide a restart or an orphan
+  kill, so a job dispatched inside that stretch can be interrupted. A `failed`
+  unit is restarted without one at all: a Worker that outlived the unit's main
+  process could find a new listener beside its job, as a unit's own
+  `Restart=` would leave it.
+- **A runner with more labels than its neighbours can take their jobs** without
+  being counted as their sibling, since siblings are runners whose label sets
+  are equal. While it idles, the others can read as all busy around an idle
+  lane, and that lane can be restarted while healthy.
+- **An unreadable or malformed restart stamp** under `/run/runner-liveness`
+  reads as no recent restart, so the cooldown does not hold for that unit.
 - **A signal that fails is not reported**, and the orphan is still counted as
   killed in that pass's summary.
 
