@@ -59,7 +59,11 @@ def still_supervised(
 
 
 def kill_orphan_listener(
-    unit: str, pid: int, dry_run: bool, report: Callable[[str], None]
+    unit: str,
+    listener: procfs.Process,
+    still_orphan: Callable[[], bool],
+    dry_run: bool,
+    report: Callable[[str], None],
 ) -> bool:
     """Kill an idle orphaned listener and its supervisor; True once it was signalled.
 
@@ -70,9 +74,18 @@ def kill_orphan_listener(
     other's runs, so an idle orphan is killed here rather than waited out. Its
     parent (the RunnerService.js supervisor) goes first, or it respawns the
     listener it was supervising.
+
+    `listener` carries the identity it was found with, and `still_orphan`
+    re-reads everything the watchdog judged it on. Both are checked before every
+    signal: the watchdog's scans between finding the listener and this call are
+    long enough for a pid to be reused, and an identity captured here instead of
+    at enumeration would vouch for whatever holds the pid by now.
     """
-    pid_identity = procfs.process_identity(pid)
-    if pid_identity is None:
+    pid, pid_identity = listener.pid, listener.identity
+    if procfs.process_identity(pid) != pid_identity or not still_orphan():
+        report(
+            f"{unit}: listener pid {pid} is no longer the orphan found - not signalled"
+        )
         return False
     parent = procfs.parent_pid(pid) or 1
     parent_identity = procfs.process_identity(parent) if parent > 1 else None
@@ -90,7 +103,9 @@ def kill_orphan_listener(
     # moment of signalling. With it gone, the listener's grace period below
     # has nothing left to respawn it.
     if parent_identity is not None:
-        if still_supervised(pid, pid_identity, parent, parent_identity):
+        if still_orphan() and still_supervised(
+            pid, pid_identity, parent, parent_identity
+        ):
             try:
                 os.kill(parent, signal.SIGKILL)
             except OSError:
@@ -101,8 +116,10 @@ def kill_orphan_listener(
             )
     # TERM before KILL so the listener can release its session with the broker;
     # a listener KILLed outright leaves a session the unit's own listener must
-    # wait out. The TERM and the KILL rest on the listener's identity alone.
-    signal_if_same(pid, pid_identity, signal.SIGTERM)
+    # wait out.
+    if still_orphan():
+        signal_if_same(pid, pid_identity, signal.SIGTERM)
     time.sleep(5)
-    signal_if_same(pid, pid_identity, signal.SIGKILL)
+    if still_orphan():
+        signal_if_same(pid, pid_identity, signal.SIGKILL)
     return True

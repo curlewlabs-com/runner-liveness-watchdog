@@ -17,6 +17,15 @@ have stopped taking jobs while still looking healthy:
 It never restarts a unit that is running a job, and never touches a unit that
 was stopped on purpose.
 
+**Scope.** It runs as root: it restarts systemd units and sends signals to
+runner processes. It supports runners installed as systemd services and
+nothing else. It has been run on Linux hosts and virtual machines carrying
+several runners each, all registered to one repository in its default runner
+group and running that repository's own workflows. A host whose runners take
+untrusted code - pull requests from forks, or any workflow you did not write -
+is outside what it has been used for; read [SECURITY.md](SECURITY.md) before
+running it there.
+
 ## Why it exists
 
 A self-hosted runner can show `online` and idle while jobs queue, or drop to
@@ -178,8 +187,11 @@ stretch since it last became free. On a lightly loaded host expect no names.
 - **Guess.** Whatever it cannot read - `ss` failing, an unlistable `/proc`, a
   main PID it cannot resolve, a worker log it cannot parse - is reported and
   read as "do not act", never as "nothing there".
-- **Signal a reused pid.** Every signal re-reads the target's start time from
-  `/proc` immediately before it is sent.
+- **Signal a process it did not judge.** An orphaned listener is recorded
+  with its start time when it is found, by its executable rather than by any
+  command line that mentions it. Before every signal the watchdog re-reads
+  that start time, the executable, the unit's cgroup and the unit's main
+  process, and sends nothing if any of them changed.
 - **Read `cgroup.procs`.** On kernels without the fix for CVE-2026-98163, a
   `cgroup.procs` read that races an exiting process can panic the kernel. The
   watchdog finds a unit's processes from each process's own
@@ -196,6 +208,19 @@ stretch since it last became free. On a lightly loaded host expect no names.
   neither is called.
 - **Siblings all on long jobs with nothing queued** read as starvation for the
   idle lane; see the starvation limit above.
+- **A socket that sent within the current millisecond** has no `lastsnd` in
+  `ss` output, which prints the field only when it is nonzero. That socket is
+  skipped rather than read as zero silence, so a listener caught that way is
+  judged on its other sockets alone, and if those are all stale it can be
+  restarted while healthy.
+- **A single `/proc` read that fails** is read as that process being gone.
+  The listing of `/proc` itself fails closed, but a Worker or an ancestor whose
+  own entry cannot be read mid-pass can be missed for that pass.
+- **A `failed` unit is restarted without a Worker check.** A Worker that
+  outlived the unit's main process could find a new listener beside its job;
+  a unit's own `Restart=` does the same.
+- **A signal that fails is not reported**, and the orphan is still counted as
+  killed in that pass's summary.
 
 ## Requirements
 

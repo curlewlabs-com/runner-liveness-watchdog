@@ -482,6 +482,32 @@ def starvation_reason(
     )
 
 
+def unit_main_pid(unit: str) -> tuple[int, str]:
+    """The unit's MainPID, 0 when systemd does not give a usable one, and the
+    text it gave."""
+    rc, text = _command_output(["systemctl", "show", "-p", "MainPID", "--value", unit])
+    text = (text if rc == 0 else f"{text}0").rstrip("\n")
+    return (int(text) if text.isascii() and text.isdigit() else 0), text
+
+
+def is_still_orphan(
+    unit: str, listener: procfs.Process, cgroup: str, main_pid: int
+) -> bool:
+    """Whether `listener` is still the orphan it was judged to be: the same
+    process, still the listener binary in the unit's cgroup, under the same
+    unit generation, and still not descended from its main process.
+
+    The main pid is re-read too: a restart after it was first read brings up a
+    new main process and a new listener, and that listener, which does not
+    descend from the old main pid, would otherwise read as the orphan.
+    """
+    return (
+        procfs.is_unit_listener(listener, cgroup)
+        and unit_main_pid(unit)[0] == main_pid
+        and not procfs.descends_from(listener.pid, main_pid)
+    )
+
+
 def judge_unit(
     unit: str,
     silence: dict[int, int],
@@ -515,13 +541,7 @@ def judge_unit(
     # costs no detection - it only rules out restarting a busy runner.
     # Before the busy check: the orphan coexists with a worker that belongs to
     # either listener, and the state it produces is worst while jobs run.
-    rc, main_pid_text = _command_output(
-        ["systemctl", "show", "-p", "MainPID", "--value", unit]
-    )
-    main_pid_text = (main_pid_text if rc == 0 else f"{main_pid_text}0").rstrip("\n")
-    main_pid = (
-        int(main_pid_text) if main_pid_text.isascii() and main_pid_text.isdigit() else 0
-    )
+    main_pid, main_pid_text = unit_main_pid(unit)
     if main_pid <= 1:
         # Without a main process to descend from, every listener would read as
         # an orphan, the unit's own included. Fail closed: no orphan judgement
@@ -532,9 +552,10 @@ def judge_unit(
     else:
         candidates = _scan(
             f"looking for Runner.Listener in {cgroup}",
-            lambda: procfs.unit_pids(cgroup, "Runner.Listener"),
+            lambda: procfs.unit_listeners(cgroup),
         )
-        for pid in candidates or []:
+        for candidate in candidates or []:
+            pid = candidate.pid
             if procfs.descends_from(pid, main_pid):
                 continue
             # An unreadable child list is read as mid-job: killing a busy orphan
@@ -548,7 +569,10 @@ def judge_unit(
                     f"{unit}: orphaned listener pid {pid} is mid-job - leaving it for the next tick"
                 )
                 continue
-            if orphans.kill_orphan_listener(unit, pid, config.dry_run, log):
+            still_orphan = partial(is_still_orphan, unit, candidate, cgroup, main_pid)
+            if orphans.kill_orphan_listener(
+                unit, candidate, still_orphan, config.dry_run, log
+            ):
                 tally.orphans += 1
 
     # A failed lookup has logged itself and skips the unit for this tick: a
@@ -560,10 +584,11 @@ def judge_unit(
     if workers is None or workers:
         return
 
-    listeners = _scan(
+    found = _scan(
         f"looking for Runner.Listener in {cgroup}",
-        lambda: procfs.unit_pids(cgroup, "Runner.Listener"),
+        lambda: procfs.unit_listeners(cgroup),
     )
+    listeners = None if found is None else [listener.pid for listener in found]
     if listeners is None:
         return
     if not listeners:

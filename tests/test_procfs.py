@@ -9,6 +9,8 @@ hand-written, as no capture held one.
 from __future__ import annotations
 
 import subprocess
+import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -76,3 +78,43 @@ class LiveProcessTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(Path("/proc/self/cgroup").exists(), "needs /proc")
+class UnitListenersTest(unittest.TestCase):
+    """The listeners the orphan check may signal, found in this test's own
+    cgroup, where both children below also sit."""
+
+    def test_only_the_listener_binary_is_found_with_the_identity_it_had(
+        self,
+    ) -> None:
+        # A command that only names the listener is not one: found as a
+        # candidate, it would be killed with its parent in the orphan's place.
+        cgroup = Path("/proc/self/cgroup").read_text().rstrip("\n")
+        self.assertTrue(cgroup.startswith("0::"), "needs the unified hierarchy")
+        cgroup = cgroup.removeprefix("0::")
+        with tempfile.TemporaryDirectory() as scratch:
+            listener_binary = Path(scratch, "bin", "Runner.Listener")
+            listener_binary.parent.mkdir()
+            # The interpreter, which runs under any name: a multi-call sleep
+            # refuses one that is not its own.
+            listener_binary.symlink_to(sys.executable)
+            listener = subprocess.Popen(
+                [str(listener_binary), "-c", "import time; time.sleep(30)"]
+            )
+            mention = subprocess.Popen(
+                ["sh", "-c", "sleep 30; : Runner.Listener"],
+            )
+            try:
+                found = procfs.unit_listeners(cgroup)
+                pids = [process.pid for process in found]
+                self.assertIn(listener.pid, pids)
+                self.assertNotIn(mention.pid, pids)
+                process = next(p for p in found if p.pid == listener.pid)
+                self.assertTrue(procfs.is_unit_listener(process, cgroup))
+                stale = procfs.Process(listener.pid, "an identity from before reuse")
+                self.assertFalse(procfs.is_unit_listener(stale, cgroup))
+            finally:
+                for child in (listener, mention):
+                    child.kill()
+                    child.wait()

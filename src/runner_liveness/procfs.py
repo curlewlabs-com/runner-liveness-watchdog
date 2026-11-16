@@ -138,8 +138,10 @@ def children_matching(parent: int, pattern: str) -> list[int]:
 
 def unit_pids(cgroup: str, pattern: str) -> list[int]:
     """PIDs in cgroup `cgroup` (a unit's ControlGroup) whose command line
-    matches `pattern` (Runner.Listener / Runner.Worker): the members
-    cgroup.procs lists, found without reading it.
+    mentions `pattern`: the members cgroup.procs lists, found without reading
+    it. For the Worker guard, where a loose match only errs toward leaving a
+    unit alone; the listeners the orphan check signals come from
+    unit_listeners.
 
     The whole cgroup file must be the unified-hierarchy line for `cgroup`, so a
     process in a child cgroup is left out, as cgroup.procs leaves it out.
@@ -149,10 +151,14 @@ def unit_pids(cgroup: str, pattern: str) -> list[int]:
         cmdline = command_line(pid)
         if cmdline is None or pattern not in cmdline:
             continue
-        membership = _read_text(f"/proc/{pid}/cgroup")
-        if membership is not None and membership.rstrip("\n") == f"0::{cgroup}":
+        if _in_cgroup(pid, cgroup):
             members.append(pid)
     return members
+
+
+def _in_cgroup(pid: int, cgroup: str) -> bool:
+    membership = _read_text(f"/proc/{pid}/cgroup")
+    return membership is not None and membership.rstrip("\n") == f"0::{cgroup}"
 
 
 @dataclass(frozen=True)
@@ -178,6 +184,49 @@ def runs_listener(argv0: str) -> bool:
     mentions the name - a `pgrep -f Runner.Listener` - is not taken for one.
     """
     return PurePath(argv0).name == "Runner.Listener"
+
+
+@dataclass(frozen=True)
+class Process:
+    """A process as it was when found: its pid, and the identity that tells it
+    apart from whatever holds that pid later."""
+
+    pid: int
+    identity: str
+
+
+def _listener_in(pid: int, cgroup: str) -> Process | None:
+    """`pid` as a listener in `cgroup`, with the identity its facts were read
+    under, or None when it is not one.
+
+    The identity is read on both sides of the facts it vouches for, so a pid
+    that exited and came back as another process between the reads is refused
+    rather than taken for the listener that was there first.
+    """
+    identity = process_identity(pid)
+    if identity is None:
+        return None
+    argv0 = _argv0(pid)
+    if argv0 is None or not runs_listener(argv0) or not _in_cgroup(pid, cgroup):
+        return None
+    return Process(pid, identity) if process_identity(pid) == identity else None
+
+
+def unit_listeners(cgroup: str) -> list[Process]:
+    """The listener processes in cgroup `cgroup` (a unit's ControlGroup).
+
+    By argv[0], not by command-line substring, and each with its identity:
+    these are the processes the orphan check may signal, so a command that only
+    names the listener must not be one, and a signal sent later must be able to
+    tell the process found here from one that took its pid since.
+    """
+    found = (_listener_in(pid, cgroup) for pid in all_pids())
+    return [process for process in found if process is not None]
+
+
+def is_unit_listener(process: Process, cgroup: str) -> bool:
+    """Whether `process` is still the listener in `cgroup` it was found as."""
+    return _listener_in(process.pid, cgroup) == process
 
 
 def lane_of_listener(argv0: str) -> Path | None:
