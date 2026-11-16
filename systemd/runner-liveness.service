@@ -1,0 +1,23 @@
+# One watchdog pass over this host's GitHub Actions runner services, fired by
+# runner-liveness.timer.
+#
+# Runs as root: it restarts units, signals the runner user's processes, and
+# needs `ss -p` to map sockets that user owns.
+#
+# Settings go in a drop-in (`systemctl edit runner-liveness.service`), so a
+# reinstall of this file does not overwrite them.
+
+[Unit]
+Description=Restart GitHub Actions runners that have stopped serving GitHub
+Documentation=https://github.com/curlewlabs-com/runner-liveness-watchdog
+
+[Service]
+Type=oneshot
+# `python3 -m` puts the working directory first on the import path, so the
+# package copied here is the one that runs.
+WorkingDirectory=/usr/local/lib/runner-liveness
+ExecStart=/usr/bin/python3 -m runner_liveness
+# A pass is a handful of ss/systemctl calls over a fixed unit list; anything
+# past a minute means a wedged systemctl or a hung /proc read, and the next
+# timer tick is a cleaner recovery than an accumulating pile of stuck oneshots.
+TimeoutStartSec=60

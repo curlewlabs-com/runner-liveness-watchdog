@@ -1,0 +1,41 @@
+[build-system]
+requires = ["flit_core==4.1.0"]
+build-backend = "flit_core.buildapi"
+
+[project]
+name = "runner-liveness-watchdog"
+version = "0.1.0"
+description = "Restart a self-hosted GitHub Actions runner service that has stopped taking jobs while still looking healthy."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Curlew Labs" }]
+# The python3 the current Ubuntu LTS ships; the package's __init__ refuses
+# anything older with a message.
+requires-python = ">=3.12"
+# Nothing: the watchdog runs on the standard library, plus systemctl and
+# iproute2's ss on PATH.
+dependencies = []
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Operating System :: POSIX :: Linux",
+  "Topic :: System :: Monitoring",
+]
+
+[project.urls]
+Repository = "https://github.com/curlewlabs-com/runner-liveness-watchdog"
+
+[tool.flit.module]
+name = "runner_liveness"
+
+[tool.ruff]
+target-version = "py312"
+
+[tool.ruff.lint]
+extend-select = ["I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+mypy_path = "src"
+files = ["src", "tests"]

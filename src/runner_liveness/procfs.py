@@ -1,0 +1,214 @@
+"""What /proc says about this host's runner processes, for the watchdog.
+
+The watchdog module decides and acts on these answers; this module only
+reads. Every answer is a fresh read at the moment of asking rather than a
+snapshot, because the watchdog re-asks between a decision and the signal it
+rests on: a process that exits, or a pid reused, in between is seen as what it
+is now.
+
+A scan reads every process's command line and, for the matches alone, that
+process's own /proc/<pid>/cgroup. It never reads a cgroup's cgroup.procs: that
+runs a kernel task iteration, and on a kernel without the upstream fix for
+CVE-2026-98163 an iteration that races a job process's exit takes a reference on
+a task already being freed and panics the kernel, failing every job on the host.
+On a kernel carrying that fix, cgroup.procs would be safe to read. A
+process's own /proc/<pid>/cgroup resolves that one task's path and iterates
+nothing.
+
+A process that exits mid-read is skipped, as if it had not been there. A /proc
+that cannot be listed at all raises OSError out of every scan, so no caller
+reads "no such process" off a read that never happened.
+
+A "lane" here is one runner installation: the directory `config.sh` was run in,
+whose `bin/Runner.Listener` its service starts.
+"""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from pathlib import Path, PurePath
+
+
+def _read_text(path: str | Path) -> str | None:
+    try:
+        return Path(path).read_text(errors="replace")
+    except OSError:
+        return None
+
+
+def all_pids() -> list[int]:
+    """Every pid on the host, ascending. Raises OSError when /proc cannot be listed."""
+    return sorted(int(name) for name in os.listdir("/proc") if name.isdigit())
+
+
+def command_line(pid: int) -> str | None:
+    """A process's argv joined by spaces, or None once it is gone.
+
+    A zombie's is empty, so no pattern matches it, which is what drops one that
+    still names its old unit in /proc/<pid>/cgroup.
+    """
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return None
+    return raw.replace(b"\0", b" ").decode(errors="replace")
+
+
+def parent_pid_from_status(status: str) -> int | None:
+    """The `PPid:` a `/proc/<pid>/status` reports, or None when it has none."""
+    for line in status.splitlines():
+        if line.startswith("PPid:"):
+            value = line.split(":", 1)[1].strip()
+            return int(value) if value.isdigit() else None
+    return None
+
+
+def parent_pid(pid: int) -> int | None:
+    status = _read_text(f"/proc/{pid}/status")
+    return None if status is None else parent_pid_from_status(status)
+
+
+def start_ticks_from_stat(stat: str) -> str | None:
+    """Field 22 of a `/proc/<pid>/stat` line: the start time in ticks since boot.
+
+    Read after the ")" that ends the comm field, so a comm carrying spaces or a
+    ")" of its own cannot shift it.
+    """
+    fields = stat.rpartition(")")[2].split()
+    return fields[19] if len(fields) > 19 and fields[19].isdigit() else None
+
+
+def process_identity(pid: int) -> str | None:
+    """A process's identity beyond its pid: its start time in clock ticks since
+    boot, which a recycled pid cannot reproduce. `ps -o lstart=` would resolve
+    only to a second.
+    """
+    stat = _read_text(f"/proc/{pid}/stat")
+    return None if stat is None else start_ticks_from_stat(stat)
+
+
+def process_started_at(pid: int) -> float | None:
+    """When a process started, in epoch seconds: boot time plus its start ticks."""
+    ticks = process_identity(pid)
+    proc_stat = _read_text("/proc/stat")
+    if ticks is None or proc_stat is None:
+        return None
+    for line in proc_stat.splitlines():
+        name, _, value = line.partition(" ")
+        if name == "btime" and value.strip().isdigit():
+            return int(value) + int(ticks) / os.sysconf("SC_CLK_TCK")
+    return None
+
+
+def uptime_seconds() -> int:
+    """Whole seconds since boot, suspended time included (proc_uptime(5))."""
+    return int(Path("/proc/uptime").read_text().split()[0].partition(".")[0])
+
+
+def descends_from(pid: int, root: int) -> bool:
+    """True when `root` is `pid` or one of its ancestors.
+
+    Walks /proc rather than trusting the cgroup: an orphaned listener sits in
+    the unit's cgroup beside the live one (systemd logs "Found left-over process
+    ... Ignoring" and carries on), so the cgroup cannot tell the two apart -
+    descent from the unit's main process can.
+    """
+    if root <= 1:
+        return False
+    current: int | None = pid
+    while current is not None and current > 1:
+        if current == root:
+            return True
+        current = parent_pid(current)
+    return False
+
+
+def children_matching(parent: int, pattern: str) -> list[int]:
+    """Direct children of `parent` whose command line mentions `pattern`."""
+    matches: list[int] = []
+    for pid in all_pids():
+        if parent_pid(pid) != parent:
+            continue
+        cmdline = command_line(pid)
+        if cmdline is not None and pattern in cmdline:
+            matches.append(pid)
+    return matches
+
+
+def unit_pids(cgroup: str, pattern: str) -> list[int]:
+    """PIDs in cgroup `cgroup` (a unit's ControlGroup) whose command line
+    matches `pattern` (Runner.Listener / Runner.Worker): the members
+    cgroup.procs lists, found without reading it.
+
+    The whole cgroup file must be the unified-hierarchy line for `cgroup`, so a
+    process in a child cgroup is left out, as cgroup.procs leaves it out.
+    """
+    members: list[int] = []
+    for pid in all_pids():
+        cmdline = command_line(pid)
+        if cmdline is None or pattern not in cmdline:
+            continue
+        membership = _read_text(f"/proc/{pid}/cgroup")
+        if membership is not None and membership.rstrip("\n") == f"0::{cgroup}":
+            members.append(pid)
+    return members
+
+
+@dataclass(frozen=True)
+class ServingLanes:
+    """The lanes live listeners serve, and the listeners whose lane is unknown."""
+
+    lanes: frozenset[Path]
+    unplaced: tuple[int, ...]
+
+
+def _argv0(pid: int) -> str | None:
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return None
+    return os.fsdecode(raw.split(b"\0", 1)[0])
+
+
+def runs_listener(argv0: str) -> bool:
+    """Whether a process whose argv[0] is `argv0` is the listener binary.
+
+    By argv[0] rather than anywhere in the command line, so a command that only
+    mentions the name - a `pgrep -f Runner.Listener` - is not taken for one.
+    """
+    return PurePath(argv0).name == "Runner.Listener"
+
+
+def lane_of_listener(argv0: str) -> Path | None:
+    """The lane a listener at `argv0` serves, when that is `<lane>/bin/Runner.Listener`."""
+    binary = Path(argv0)
+    if (
+        not binary.is_absolute()
+        or binary.name != "Runner.Listener"
+        or binary.parent.name != "bin"
+    ):
+        return None
+    return binary.parent.parent
+
+
+def listener_lane(pid: int) -> Path | None:
+    """The lane listener `pid` serves, or None when it cannot be read."""
+    argv0 = _argv0(pid)
+    return None if argv0 is None else lane_of_listener(argv0)
+
+
+def serving_lanes() -> ServingLanes:
+    """Every lane on this host that a live listener is serving."""
+    lanes: set[Path] = set()
+    unplaced: list[int] = []
+    for pid in all_pids():
+        argv0 = _argv0(pid)
+        if argv0 is None or not runs_listener(argv0):
+            continue
+        lane = lane_of_listener(argv0)
+        if lane is None:
+            unplaced.append(pid)
+        else:
+            lanes.add(lane)
+    return ServingLanes(lanes=frozenset(lanes), unplaced=tuple(unplaced))
