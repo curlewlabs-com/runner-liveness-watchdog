@@ -88,6 +88,16 @@ def process_identity(pid: int) -> str | None:
     return None if stat is None else start_ticks_from_stat(stat)
 
 
+def has_exited(pid: int, identity: str) -> bool:
+    """Whether the process `identity` named at `pid` is gone: its pid is free or
+    holds another process, or it is a zombie waiting to be reaped."""
+    stat = _read_text(f"/proc/{pid}/stat")
+    if stat is None or start_ticks_from_stat(stat) != identity:
+        return True
+    fields = stat.rpartition(")")[2].split()
+    return bool(fields) and fields[0] in ("Z", "X")
+
+
 def process_started_at(pid: int) -> float | None:
     """When a process started, in epoch seconds: boot time plus its start ticks."""
     ticks = process_identity(pid)

@@ -8,6 +8,7 @@ hand-written, as no capture held one.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import tempfile
@@ -61,6 +62,31 @@ class ListenerLaneTest(unittest.TestCase):
 
 @unittest.skipUnless(Path("/proc/self/stat").exists(), "needs /proc")
 class LiveProcessTest(unittest.TestCase):
+    def test_a_zombie_has_exited(self) -> None:
+        # A KILLed orphan stays a zombie until reaped; read as alive, the pass
+        # would report a kill that worked as one that failed. waitid with
+        # WNOWAIT returns once the child has exited and leaves it unreaped.
+        child = subprocess.Popen(["true"])
+        identity = procfs.process_identity(child.pid)
+        assert identity is not None
+        try:
+            os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOWAIT)
+            self.assertTrue(procfs.has_exited(child.pid, identity))
+            self.assertIsNotNone(procfs.process_identity(child.pid))
+        finally:
+            child.wait()
+
+    def test_a_running_process_has_not_exited(self) -> None:
+        child = subprocess.Popen(["sleep", "30"])
+        try:
+            identity = procfs.process_identity(child.pid)
+            assert identity is not None
+            self.assertFalse(procfs.has_exited(child.pid, identity))
+            self.assertTrue(procfs.has_exited(child.pid, "another identity"))
+        finally:
+            child.kill()
+            child.wait()
+
     def test_a_child_descends_from_its_parent_and_not_the_reverse(self) -> None:
         # The orphan check rests on this: a listener that does not descend from
         # its unit's main process is the one it kills.
