@@ -114,13 +114,17 @@ def recorded_labels(lane: Path, labels_file: str) -> frozenset[str] | None:
 
     The runner keeps no local copy of the labels it registered with, so the file
     is the operator's: comma-separated, as `config.sh --labels` takes them. A
-    set, because GitHub attaches no meaning to label order.
+    set of casefolded, trimmed labels, because GitHub attaches no meaning to
+    label order or case: siblings whose files differ only in those must still
+    match, or an idle one drops out and the busy rest read as all-busy.
     """
     try:
         record = (lane / labels_file).read_text(errors="replace")
     except OSError:
         return None
-    labels = frozenset(label for label in record.strip().split(",") if label)
+    labels = frozenset(
+        label.strip().casefold() for label in record.split(",") if label.strip()
+    )
     return labels or None
 
 

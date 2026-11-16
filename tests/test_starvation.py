@@ -332,6 +332,25 @@ class RecordedLabelsTest(unittest.TestCase):
                 starvation.recorded_labels(second, LABELS),
             )
 
+    def test_lanes_differing_only_in_label_case_or_spacing_are_siblings(
+        self,
+    ) -> None:
+        # GitHub matches labels case-insensitively; an idle sibling whose file
+        # spells one differently would otherwise drop out of the group, and the
+        # busy rest would read as all-busy around the judged lane.
+        with tempfile.TemporaryDirectory() as scratch:
+            first, second = Path(scratch, "a"), Path(scratch, "b")
+            for lane, record in (
+                (first, "self-hosted,Linux,GPU"),
+                (second, " self-hosted , linux,gpu \n"),
+            ):
+                lane.mkdir()
+                (lane / LABELS).write_text(record)
+            self.assertEqual(
+                starvation.recorded_labels(first, LABELS),
+                starvation.recorded_labels(second, LABELS),
+            )
+
     def test_a_lane_without_a_record_cannot_be_judged(self) -> None:
         with tempfile.TemporaryDirectory() as scratch:
             self.assertIsNone(starvation.recorded_labels(Path(scratch), LABELS))

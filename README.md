@@ -130,9 +130,14 @@ in), comma-separated as `config.sh --labels` takes them, and name that file in
 echo "self-hosted,linux,x64,gpu" > /home/runner/actions-runner-1/.runner-labels
 ```
 
-Order does not matter. Once it is on, give every runner on the host a labels
-file: while any serving runner lacks one, the starvation check skips the whole
-host, since that runner might be an idle sibling.
+Runners whose files hold the same set are treated as interchangeable, so the
+file has to say everything GitHub routes on. Order, case and spaces around a
+label do not matter. Runners registered to different repositories,
+organizations or runner groups are not interchangeable even with identical
+labels: give each such set its own entry, such as the group's name, so they do
+not match. Once the check is on, give every runner on the host a labels file:
+while any serving runner lacks one, the starvation check skips the whole host,
+since that runner might be an idle sibling.
 
 ### Proving detection works without restarting anything
 
