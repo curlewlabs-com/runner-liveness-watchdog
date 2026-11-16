@@ -1,0 +1,32 @@
+# Drives runner-liveness.service.
+#
+# The 5-minute cadence is not what dominates the recovery bound - the limits
+# are. A wedge is called on the pass after the one that first finds it past the
+# silence limit, so worst-case wedge dwell is that limit plus an interval for
+# each of those passes, and a starved lane on the first pass after it crosses
+# the starvation limit, each pass firing within systemd's accuracy window
+# (AccuracyUSec defaults to 1min).
+#
+# The triggers below are monotonic, and systemd.timer(5) notes that the
+# monotonic clock generally pauses while the computer is suspended. That holds
+# for a host that suspends itself; a KVM guest was observed with the interval
+# running on through its hypervisor host's suspend, so the timer comes due
+# during the nap and fires the moment the guest resumes, before its listeners
+# have sent again. The watchdog keeps that resume pass from reading the nap as
+# silence.
+#
+# No Persistent= here: systemd.timer(5) states it only has an effect on timers
+# configured with OnCalendar=. No WakeSystem= either: a sleeping host's runners
+# take no job a restart could save.
+
+[Unit]
+Description=Periodic liveness check for the GitHub Actions runner services
+
+[Timer]
+# Well after the runner services and the network are up, so the first pass
+# judges settled listeners rather than ones still making their first connection.
+OnBootSec=10min
+OnUnitActiveSec=5min
+
+[Install]
+WantedBy=timers.target
