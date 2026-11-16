@@ -108,18 +108,31 @@ def kill_orphan_listener(
         ):
             try:
                 os.kill(parent, signal.SIGKILL)
-            except OSError:
-                pass
+            except OSError as error:
+                report(f"{unit}: SIGKILL to supervisor {parent} failed: {error}")
         else:
             report(
                 f"{unit}: supervisor {parent} not re-verified as the orphan's parent - not signalled"
             )
     # TERM before KILL so the listener can release its session with the broker;
     # a listener KILLed outright leaves a session the unit's own listener must
-    # wait out.
-    if still_orphan():
-        signal_if_same(pid, pid_identity, signal.SIGTERM)
+    # wait out. Only a TERM that was sent counts the orphan as killed: one that
+    # was not leaves it running, and the summary must not say otherwise.
+    if not (still_orphan() and signal_if_same(pid, pid_identity, signal.SIGTERM)):
+        report(
+            f"{unit}: orphaned listener pid {pid} not signalled - gone, no longer"
+            " the idle orphan, or the signal failed"
+        )
+        return False
     time.sleep(5)
-    if still_orphan():
-        signal_if_same(pid, pid_identity, signal.SIGKILL)
-    return True
+    # Killed means gone: it left on its TERM, or a KILL reached it. A TERM alone
+    # establishes neither, and a KILL that did not land leaves it running.
+    if procfs.has_exited(pid, pid_identity):
+        return True
+    if still_orphan() and signal_if_same(pid, pid_identity, signal.SIGKILL):
+        return True
+    report(
+        f"{unit}: orphaned listener pid {pid} survived its TERM and was not"
+        " KILLed - gone, no longer the idle orphan, or the signal failed"
+    )
+    return False

@@ -179,11 +179,18 @@ stretch since it last became free. On a lightly loaded host expect no names.
 ## What it never does
 
 - **Interrupt a job.** A unit with a live `Runner.Worker` is not restarted, and
-  an orphaned listener with a Worker child is left for a later pass.
+  an orphaned listener with a Worker child is left for a later pass. The
+  Worker set is re-read just before the restart and before every signal, so a
+  job dispatched while the pass was deciding is not interrupted either; only
+  a job landing in the moment between that read and the `systemctl` calls
+  that follow it can be. A `failed` unit whose Worker outlived its main
+  process is held, and reported as down.
 - **Undo an operator.** `inactive`, `activating` and `deactivating` units are
   counted in the summary and left alone.
 - **Thrash.** A unit it restarted is not restarted again for an hour. A runner
-  still down inside that hour keeps the pass failing, so it stays visible.
+  still down inside that hour keeps the pass failing, so it stays visible. A
+  restart stamp that cannot be read holds the restart rather than skipping the
+  cooldown.
 - **Guess.** Whatever it cannot read - `ss` failing, an unlistable `/proc`, a
   main PID it cannot resolve, a worker log it cannot parse - is reported and
   read as "do not act", never as "nothing there".
@@ -197,7 +204,9 @@ stretch since it last became free. On a lightly loaded host expect no names.
   watchdog finds a unit's processes from each process's own
   `/proc/<pid>/cgroup` instead.
 
-## Known issues
+## Limits
+
+What it deliberately does not cover, and why:
 
 - **A host that sleeps while a job runs** inflates the starvation measure: a
   job spans its worker log's name to its last write, so a nap inside a
@@ -208,28 +217,18 @@ stretch since it last became free. On a lightly loaded host expect no names.
   neither is called.
 - **Siblings all on long jobs with nothing queued** read as starvation for the
   idle lane; see the starvation limit above.
-- **A socket that sent within the current millisecond** has no `lastsnd` in
-  `ss` output, which prints the field only when it is nonzero. That socket is
-  skipped rather than read as zero silence, so a listener caught that way is
-  judged on its other sockets alone, and if those are all stale it can be
-  restarted while healthy.
-- **A single `/proc` read that fails** is read as that process being gone.
-  The listing of `/proc` itself fails closed, but a Worker or an ancestor whose
-  own entry cannot be read mid-pass can be missed for that pass.
-- **The Worker check is not re-read immediately before acting.** It is read
-  once per unit per pass, before the reads that decide a restart or an orphan
-  kill, so a job dispatched inside that stretch can be interrupted. A `failed`
-  unit is restarted without one at all: a Worker that outlived the unit's main
-  process could find a new listener beside its job, as a unit's own
-  `Restart=` would leave it.
-- **A runner with more labels than its neighbours can take their jobs** without
-  being counted as their sibling, since siblings are runners whose label sets
-  are equal. While it idles, the others can read as all busy around an idle
-  lane, and that lane can be restarted while healthy.
-- **An unreadable or malformed restart stamp** under `/run/runner-liveness`
-  reads as no recent restart, so the cooldown does not hold for that unit.
-- **A signal that fails is not reported**, and the orphan is still counted as
-  killed in that pass's summary.
+- **Siblings are runners with equal label sets.** The check assumes each job
+  requests a runner's whole set, as it does where runners differ by a label
+  that names them apart. Any two runners sharing a label can compete for a job
+  that requests only what they share, so no rule over label sets alone is
+  complete; where workflows request such a subset, a differing runner left
+  idle can make the judged lane read as starved. Give such runners equal
+  labels files, or leave the check off.
+- **A per-process `/proc` read that fails is read as that process having
+  exited.** The watchdog runs as root and reads `cmdline`, `status`, `stat`
+  and `cgroup`, which are world-readable and fail only once the process is
+  gone. A listing of `/proc` that fails is reported, and that unit is not
+  judged on that pass.
 
 ## Requirements
 

@@ -11,8 +11,10 @@ import signal
 import subprocess
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from runner_liveness import orphans, procfs
+from tests.support import wait_until
 
 
 @unittest.skipUnless(Path("/proc/self/stat").exists(), "needs /proc")
@@ -72,6 +74,91 @@ class KillOrphanListenerTest(unittest.TestCase):
             shell.wait()
             if reuser_identity is not None:
                 orphans.signal_if_same(reuser, reuser_identity, signal.SIGKILL)
+
+    def test_an_orphan_that_stopped_being_one_is_not_signalled_or_counted(
+        self,
+    ) -> None:
+        # Between finding the orphan and its TERM it can pick up a job or go;
+        # nothing is signalled then, and the pass must not count it as killed.
+        shell = subprocess.Popen(
+            ["sh", "-c", "sleep 300 & echo $!; wait"],
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        listener = 0
+        try:
+            assert shell.stdout is not None
+            listener = int(shell.stdout.readline())
+            identity = procfs.process_identity(listener)
+            assert identity is not None
+            answers = iter([True])
+            messages: list[str] = []
+            killed = orphans.kill_orphan_listener(
+                "unit",
+                procfs.Process(listener, identity),
+                lambda: next(answers, False),
+                False,
+                messages.append,
+            )
+            self.assertFalse(killed)
+            self.assertIsNone(shell.poll())
+            self.assertEqual(procfs.process_identity(listener), identity)
+            self.assertTrue(any("not signalled" in m for m in messages), messages)
+        finally:
+            left = procfs.process_identity(listener) if listener else None
+            shell.kill()
+            shell.wait()
+            if left is not None:
+                orphans.signal_if_same(listener, left, signal.SIGKILL)
+
+    def test_an_orphan_that_ignores_its_term_is_killed_and_counted(self) -> None:
+        # A delivered TERM alone does not make it gone; the KILL after the grace
+        # period does, and only then does the pass count it. The listener says
+        # its pid only once it ignores TERM, so the TERM cannot beat the trap.
+        shell = subprocess.Popen(
+            [
+                "sh",
+                "-c",
+                "sh -c 'trap \"\" TERM; echo $$; exec sleep 300' & wait",
+            ],
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        listener = 0
+        sent: list[signal.Signals] = []
+        real_signal_if_same = orphans.signal_if_same
+
+        def recorded(pid: int, identity: str, signum: signal.Signals) -> bool:
+            sent.append(signum)
+            return real_signal_if_same(pid, identity, signum)
+
+        try:
+            assert shell.stdout is not None
+            listener = int(shell.stdout.readline())
+            identity = procfs.process_identity(listener)
+            assert identity is not None
+            with (
+                mock.patch("time.sleep", lambda seconds: None),
+                mock.patch.object(orphans, "signal_if_same", recorded),
+            ):
+                killed = orphans.kill_orphan_listener(
+                    "unit",
+                    procfs.Process(listener, identity),
+                    lambda: not procfs.has_exited(listener, identity),
+                    False,
+                    lambda message: None,
+                )
+            self.assertTrue(killed)
+            self.assertEqual(sent, [signal.SIGTERM, signal.SIGKILL])
+            self.assertTrue(wait_until(lambda: procfs.has_exited(listener, identity)))
+        finally:
+            # The listener ignores TERM, so a failure above must not leave it
+            # running: KILL it by its identity if it is still there.
+            left = procfs.process_identity(listener) if listener else None
+            shell.kill()
+            shell.wait()
+            if left is not None:
+                real_signal_if_same(listener, left, signal.SIGKILL)
 
 
 if __name__ == "__main__":

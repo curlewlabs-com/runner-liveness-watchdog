@@ -264,14 +264,19 @@ def parse_socket_silence(raw: str) -> dict[int, int]:
     line's pid is carried forward onto the detail line that follows it. Detail
     lines are the indented ones; that is what separates the two. Only the first
     pid on a socket line and the first detail line after it count.
+
+    A detail line without `lastsnd` is a socket that sent within the current
+    millisecond: ss prints the field only when it is nonzero (iproute2
+    `misc/ss.c`). Skipped instead, it would leave the listener judged on its
+    staler sockets alone, and a healthy one restarted.
     """
     quietest: dict[int, int] = {}
     current: int | None = None
     for line in raw.split("\n"):
         if line[:1] in (" ", "\t"):
-            silence = re.search(r"lastsnd:([0-9]+)", line)
-            if current is not None and silence is not None:
-                ms = int(silence.group(1))
+            if current is not None:
+                silence = re.search(r"lastsnd:([0-9]+)", line)
+                ms = 0 if silence is None else int(silence.group(1))
                 if current not in quietest or ms < quietest[current]:
                     quietest[current] = ms
             current = None
@@ -344,26 +349,86 @@ class RestartOutcome(Enum):
     HELD = 3
 
 
-def restart_unit(unit: str, reason: str, config: Config) -> RestartOutcome:
-    if config.dry_run:
-        log(f"{unit}: {reason} - WOULD restart (dry run)")
-        return RestartOutcome.DECLINED
+def last_restart(stamp: Path) -> tuple[int | None, str | None]:
+    """When the unit was last restarted, from its stamp, and what was wrong with
+    the stamp if anything was.
 
+    Only an absent stamp means no recent restart. One that does not parse is
+    dated by its mtime, which the write that made it set; one that cannot be
+    read at all answers None with a reason, and the caller holds the restart:
+    the cooldown is what keeps a unit from being restarted every tick, so a
+    stamp nobody can read must not switch it off.
+    """
+    try:
+        recorded = stamp.read_text(errors="replace").strip()
+    except FileNotFoundError:
+        return None, None
+    except OSError as error:
+        return None, f"restart stamp {stamp} unreadable ({error})"
+    if recorded.isascii() and recorded.isdigit():
+        return int(recorded), None
+    try:
+        return int(stamp.stat().st_mtime), (
+            f"restart stamp '{recorded}' is unusable - dating it by its mtime"
+        )
+    except OSError as error:
+        return None, f"restart stamp {stamp} unreadable ({error})"
+
+
+def live_workers(unit: str, cgroup: str) -> list[int] | None:
+    """The unit's Runner.Worker pids, read now; None, reported, when unreadable.
+
+    A cgroup systemd has already removed holds no process, so it holds none.
+    """
+    if not Path(f"/sys/fs/cgroup{cgroup}").is_dir():
+        return []
+    return _scan(
+        f"looking for Runner.Worker in {cgroup}",
+        lambda: procfs.unit_pids(cgroup, "Runner.Worker"),
+    )
+
+
+def restart_unit(
+    unit: str, reason: str, cgroup: str, config: Config, *, failed: bool = False
+) -> RestartOutcome:
+    """Restart `unit`, unless a Worker is live in its cgroup or its cooldown holds.
+
+    The Worker set is re-read here, at the act: the earlier check is stale by
+    the time the silence or starvation reads behind it have run, and a job
+    dispatched in that stretch must not be interrupted. On an active unit a
+    live Worker means the runner took a job, which declines the restart; on a
+    `failed` one it is a job outliving the unit's main process, so the runner
+    is still down and the pass says so.
+    """
     stamp = STATE_DIR / unit
     now = int(time.time())
-    recorded = _read_file(stamp)
-    if recorded is not None:
-        last = recorded.strip()
-        if not (last.isascii() and last.isdigit()):
+    if not config.dry_run:
+        last, problem = last_restart(stamp)
+        if problem is not None:
+            log(f"{unit}: {problem}")
+        if last is None and problem is not None:
+            log(f"{unit}: {reason}, but the last restart cannot be dated - holding off")
+            return RestartOutcome.HELD
+        if last is not None and now - last < RESTART_COOLDOWN_SECONDS:
             log(
-                f"{unit}: restart stamp '{last}' is unusable - treating it as no recent restart"
-            )
-        elif now - int(last) < RESTART_COOLDOWN_SECONDS:
-            log(
-                f"{unit}: {reason}, but restarted {now - int(last)}s ago - holding off"
+                f"{unit}: {reason}, but restarted {now - last}s ago - holding off"
                 f" (cooldown {RESTART_COOLDOWN_SECONDS}s)"
             )
             return RestartOutcome.HELD
+
+    # The last read before acting, so only the stamp write and reset-failed sit
+    # between it and the restart. Not after reset-failed: that turns a `failed`
+    # unit `inactive`, which reads as stopped on purpose, so a unit held here
+    # would never be revived.
+    workers = live_workers(unit, cgroup) if cgroup else []
+    if workers is None or workers:
+        log(
+            f"{unit}: {reason}, but a Runner.Worker is live or unreadable - not restarting"
+        )
+        return RestartOutcome.HELD if failed else RestartOutcome.DECLINED
+    if config.dry_run:
+        log(f"{unit}: {reason} - WOULD restart (dry run)")
+        return RestartOutcome.DECLINED
 
     stamp.write_text(f"{now}\n")
     log(f"{unit}: {reason} - restarting")
@@ -493,19 +558,28 @@ def unit_main_pid(unit: str) -> tuple[int, str]:
 def is_still_orphan(
     unit: str, listener: procfs.Process, cgroup: str, main_pid: int
 ) -> bool:
-    """Whether `listener` is still the orphan it was judged to be: the same
-    process, still the listener binary in the unit's cgroup, under the same
-    unit generation, and still not descended from its main process.
+    """Whether `listener` is still the idle orphan it was judged to be: the
+    same process, still the listener binary in the unit's cgroup, under the
+    same unit generation, still not descended from its main process, and
+    still without a Runner.Worker child.
 
     The main pid is re-read too: a restart after it was first read brings up a
     new main process and a new listener, and that listener, which does not
-    descend from the old main pid, would otherwise read as the orphan.
+    descend from the old main pid, would otherwise read as the orphan. The
+    Worker children are re-read because killing a busy orphan kills its job;
+    a child list that cannot be read is read as mid-job.
     """
-    return (
+    if not (
         procfs.is_unit_listener(listener, cgroup)
         and unit_main_pid(unit)[0] == main_pid
         and not procfs.descends_from(listener.pid, main_pid)
-    )
+    ):
+        return False
+    try:
+        return procfs.children_matching(listener.pid, "Runner.Worker") == []
+    except OSError as error:
+        log(f"{unit}: cannot list /proc for the children of {listener.pid}: {error}")
+        return False
 
 
 def judge_unit(
@@ -516,10 +590,28 @@ def judge_unit(
     tally: Tally,
 ) -> None:
     state = _command_output(["systemctl", "is-active", unit])[1].rstrip("\n")
+    cgroup_rc, cgroup = _command_output(
+        ["systemctl", "show", "-p", "ControlGroup", "--value", unit]
+    )
+    cgroup = cgroup.rstrip("\n")
+    if cgroup_rc != 0:
+        # An empty value from a query that failed is not "no cgroup left": the
+        # Worker guard would read nothing and let a failed unit be restarted
+        # beside a job that outlived it. A failed unit stays reported as down.
+        log(f"{unit}: systemctl show ControlGroup failed (rc={cgroup_rc}) - skipping")
+        if state == "failed":
+            tally.held += 1
+        return
     if state == "failed":
+        # A Worker can outlive a failed unit's main process (KillMode=process),
+        # so the restart's Worker guard reads this cgroup too.
         tally.record(
             restart_unit(
-                unit, "unit is 'failed' - systemd has stopped retrying it", config
+                unit,
+                "unit is 'failed' - systemd has stopped retrying it",
+                cgroup,
+                config,
+                failed=True,
             )
         )
         return
@@ -529,10 +621,6 @@ def judge_unit(
         log(f"{unit}: '{state}' - leaving it alone (not a failure this should undo)")
         return
 
-    cgroup = _command_output(
-        ["systemctl", "show", "-p", "ControlGroup", "--value", unit]
-    )[1]
-    cgroup = cgroup.rstrip("\n")
     if not cgroup or not Path(f"/sys/fs/cgroup{cgroup}").is_dir():
         log(f"{unit}: active but no readable cgroup - skipping")
         return
@@ -623,6 +711,7 @@ def judge_unit(
                     f"listener silent for {quietest // 1000}s,"
                     f" {before_previous_pass_ms // 1000}s of it before the previous pass"
                     f" (limit {limit_ms // 1000}s)",
+                    cgroup,
                     config,
                 )
             )
@@ -637,7 +726,7 @@ def judge_unit(
 
     reason = starvation_reason(unit, listeners, config)
     if reason is not None:
-        tally.record(restart_unit(unit, reason, config))
+        tally.record(restart_unit(unit, reason, cgroup, config))
 
 
 def main() -> int:
