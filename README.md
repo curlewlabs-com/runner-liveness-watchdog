@@ -59,7 +59,7 @@ This tool keys on what each of those states actually looks like from the host:
 - **Starved lane.** The listener keeps long-polling, GitHub shows it online
   and not busy, and yet it is assigned nothing while its siblings take every
   job. A restart opens a new session and it takes work at once. The watchdog
-  measures how long the lane has been idle while *every* same-label sibling on
+  measures how long the lane has been idle while _every_ same-label sibling on
   the host was running a job at once, from the runners' own
   `_diag/Worker_*.log` files. In that state the lane was the host's only free
   runner for those labels, so a healthy one would have been given the next
@@ -108,12 +108,12 @@ overwrite them (`systemctl edit runner-liveness.service`):
 Environment=RUNNER_LIVENESS_LABELS_FILE=.runner-labels
 ```
 
-| Variable | Default | What it does |
-|---|---|---|
-| `RUNNER_LIVENESS_LABELS_FILE` | unset: starvation check off | Name of a file in each runner directory that lists the runner's labels, turning the starvation check on. |
-| `RUNNER_LIVENESS_SILENCE_LIMIT_MS` | `1800000` (30 min) | How long a listener's quietest socket must have been silent, before the previous pass, to be called wedged. |
-| `RUNNER_LIVENESS_STARVED_LIMIT_SECONDS` | `1200` (20 min) | How long a lane's same-label siblings must all have been running jobs at once while it idled, to be called starved. |
-| `RUNNER_LIVENESS_DRY_RUN` | `0` | Any other value logs each decision as `WOULD restart` / `WOULD kill` and acts on nothing. |
+| Variable                                | Default                     | What it does                                                                                                        |
+| --------------------------------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `RUNNER_LIVENESS_LABELS_FILE`           | unset: starvation check off | Name of a file in each runner directory that lists the runner's labels, turning the starvation check on.            |
+| `RUNNER_LIVENESS_SILENCE_LIMIT_MS`      | `1800000` (30 min)          | How long a listener's quietest socket must have been silent, before the previous pass, to be called wedged.         |
+| `RUNNER_LIVENESS_STARVED_LIMIT_SECONDS` | `1200` (20 min)             | How long a lane's same-label siblings must all have been running jobs at once while it idled, to be called starved. |
+| `RUNNER_LIVENESS_DRY_RUN`               | `0`                         | Any other value logs each decision as `WOULD restart` / `WOULD kill` and acts on nothing.                           |
 
 **Silence limit.** Job length does not move it: a unit running a job is never
 judged, and an idle listener's polling cadence is the runner's, not your
@@ -252,7 +252,7 @@ change a setting's name or default; the release notes say so.
 ```sh
 python3 -m unittest discover -s tests -t .
 python3 -m pip install -r requirements-dev.txt
-ruff format --check . && ruff check . && mypy
+mypy
 ```
 
 The tests that read a live process's `/proc` entries skip off Linux. See

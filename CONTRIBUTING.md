@@ -21,7 +21,7 @@ These are the checks CI runs on every push and pull request:
 ```sh
 python3 -m unittest discover -s tests -t .
 python3 -m pip install -r requirements-dev.txt
-ruff format --check . && ruff check . && mypy
+mypy
 ```
 
 The `/proc` tests skip off Linux; CI runs them on Linux x86_64 and arm64.
