@@ -264,7 +264,10 @@ class OrphanRevalidationTest(unittest.TestCase):
 
     def still_orphan(self, listener: procfs.Process) -> bool:
         # MainPID 1: nothing descends from it, so only the rest is judged.
-        with mock.patch.object(watchdog, "unit_main_pid", lambda unit: (1, "1")):
+        def main_pid_one(unit: str) -> tuple[int, str]:
+            return (1, "1")
+
+        with mock.patch.object(watchdog, "unit_main_pid", main_pid_one):
             return watchdog.is_still_orphan("u.service", listener, self.cgroup, 1)
 
     def test_an_idle_orphan_is_still_one(self) -> None:
