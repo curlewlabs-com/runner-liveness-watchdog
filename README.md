@@ -260,4 +260,16 @@ The tests that read a live process's `/proc` entries skip off Linux. See
 
 ## License
 
-MIT - see [LICENSE](LICENSE). Copyright Curlew Labs.
+Licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT license ([LICENSE-MIT](LICENSE-MIT))
+
+at your option. Releases published under the MIT license alone may also be used
+under either license.
+
+### Contribution
+
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in this project by you, as defined in the Apache-2.0 license,
+shall be dual licensed as above, without any additional terms or conditions.
