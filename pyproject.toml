@@ -4,7 +4,7 @@ build-backend = "flit_core.buildapi"
 
 [project]
 name = "runner-liveness-watchdog"
-version = "0.1.1"
+version = "0.1.2"
 description = "Restart a self-hosted GitHub Actions runner service that has stopped taking jobs while still looking healthy."
 readme = "README.md"
 license = "MIT OR Apache-2.0"
