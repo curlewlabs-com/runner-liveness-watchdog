@@ -137,8 +137,12 @@ class KillOrphanListenerTest(unittest.TestCase):
             listener = int(shell.stdout.readline())
             identity = procfs.process_identity(listener)
             assert identity is not None
+
+            def no_sleep(seconds: float) -> None:
+                return None
+
             with (
-                mock.patch("time.sleep", lambda seconds: None),
+                mock.patch("time.sleep", no_sleep),
                 mock.patch.object(orphans, "signal_if_same", recorded),
             ):
                 killed = orphans.kill_orphan_listener(
